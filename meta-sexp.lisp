@@ -253,10 +253,6 @@
          (read-atom ,ctx)
          nil)))
 
-(defmacro match-rule (ctx rule args)
-  `(,rule ,@(nconc (list ctx) args)))
-
-
 ;;; Grammar Compiler
 
 (defgeneric transform-grammar (ret ctx in-meta directive &optional args)
