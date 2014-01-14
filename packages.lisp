@@ -35,8 +35,25 @@
            :defatom
            :defrule
            :defrenderer
-           :create-parser-context
            :meta
+           ;; Context protocol
+           :create-parser-context
+           :peek-atom
+           :read-atom
+           :checkpoint
+           :checkpointed-p
+           :commit
+           :rollback
+           :begin-nocase
+           :begin-case
+           :end-case-region
+           :case-sensitive-p
+           :case-insensitive-p
+           :cursor
+           :context-subseq
+           :context-data
+           :next-cursor
+           :attachment
            ;; Accumulators.
            :make-char-accum
            :char-accum-push
