@@ -31,21 +31,88 @@
 
 ;;; Parser Context Structure & Routines
 
-(defstruct parser-context
-  (data nil :read-only t :type string)
-  (size nil :read-only t :type unsigned-byte)
-  (cursor 0 :type unsigned-byte)
-  (checkpoints nil)
-  (icases nil)
-  attachment)
+(defclass parser-context ()
+  ()
+  (:documentation "Base for all parser context classes."))
+
+(defgeneric create-parser-context (input &rest args)
+  (:documentation "Create a new parser context from INPUT and ARGS."))
+
+(defgeneric peek-atom (context)
+  (:documentation "Return the current item from CONTEXT without consuming it. Returns (VALUES atom eof-p), where atom is nil if eof-p is t, and eof-p is t if there is no current data to be read."))
+
+(defgeneric read-atom (context)
+  (:documentation "Consume and return the current item from CONTEXT. The default method simply calls PEEK-CHAR; specializing classes can provide an :after method to increment the cursor.")
+  (:method ((context parser-context))
+    (peek-atom context)))
+
+(defgeneric checkpoint (context)
+  ;; TODO: "state" or "position"? (there might be both positional and
+  ;; icase-related state -- do we save and restore both, or just one?)
+  (:documentation "Store the current state of CONTEXT for later restoration."))
+
+(defgeneric checkpointed-p (context)
+  (:documentation "Return t if CONTEXT has a saved checkpoint, nil otherwise."))
+
+(defgeneric commit (context)
+  (:documentation "Commit (remove) the last saved checkpoint."))
+
+(defgeneric rollback (context)
+  (:documentation "Restore the context state saved in the last checkpoint. An error is signaled if there is no saved checkpoint."))
+
+(defgeneric begin-nocase (context)
+  (:documentation "Begin a region where matches are done case-insensitively."))
+
+(defgeneric begin-case (context)
+  (:documentation "Begin a region where matches are done case-sensitively (the default). This is used to restore case-sensitivity within a case-insensitive region."))
+
+(defgeneric end-case-region (context)
+  (:documentation "End the most recent case-insensitive or case-sensitive region. If there is no such region, the default of case-sensitivity is restored."))
+
+(defgeneric case-sensitive-p (context)
+  (:documentation "Returns t if CONTEXT is matching case-sensitively, nil otherwise.")
+  (:method ((context parser-context))
+    (not (case-insensitive-p context))))
+
+(defgeneric case-insensitive-p (context)
+  (:documentation "Returns t if CONTEXT is matching case-insensitively, nil otherwise."))
+
+(defgeneric cursor (context)
+  (:documentation "Return an object indicating the current match location in the context."))
+
+(defgeneric context-subseq (context start &optional end)
+  (:documentation "Return a new context for the subsequence of this context bounded by the cursor objects START and (optionally) END. As with SUBSEQ, END is an exclusive bound, and if END is nil, the end of the sequence is used."))
+
+(defgeneric context-data (context)
+  (:documentation "Return the data covered by CONTEXT, in whatever format is appropriate for the context."))
+
+(defgeneric next-cursor (context cursor)
+  (:documentation "Return a cursor object for the position after CURSOR in CONTEXT."))
+
+(defgeneric attachment (context)
+  (:documentation "Return a user-defined data object attached to CONTEXT."))
+
+(defgeneric (setf attachment) (val context)
+  (:documentation "Set the user-defined data object attached to CONTEXT to VAL."))
+
+(defclass string-parser-context (parser-context)
+  ((data :initarg :data :reader source-data :type string)
+   (cursor :initarg :start :accessor cursor :type '(or null (integer 0)))
+   ;; Artificial buffer size, used for zero-copy subsequences
+   (size :initarg :size :accessor data-size :type '(integer 0))
+   (case-regions :initform nil :accessor case-regions :type list)
+   (checkpoints :initform nil :accessor checkpoints :type list)
+   (attachment :initarg :attachment :accessor attachment))
+  (:documentation "A parser context used when parsing a string."))
 
 (defgeneric create-parser-context (input &rest args))
 
 (defmethod create-parser-context ((input string) &key start end attachment)
-  (make-parser-context :data input
-                       :cursor (or start 0)
-                       :size (or end (length input))
-                       :attachment attachment))
+  (make-instance 'string-parser-context
+                 :data input
+                 :start (or start 0)
+                 :size (or end (length input))
+                 :attachment attachment))
 
 (defmethod create-parser-context
     ((input stream) &key buffer-size start end attachment)
@@ -63,42 +130,107 @@
                    :end (or end size)
                    :attachment attachment))))
 
-(declaim (inline peek-atom))
-(defun peek-atom (ctx)
-  (if (< (parser-context-cursor ctx) (parser-context-size ctx))
-      (elt (parser-context-data ctx) (parser-context-cursor ctx))))
+(defmethod peek-atom ((ctx string-parser-context))
+  (with-accessors ((size data-size)
+                   (cursor cursor)
+                   (data source-data))
+      ctx
+    (if (< cursor size)
+        (values (elt data cursor) nil)
+        (values nil t))))
 
-(declaim (inline read-atom))
-(defun read-atom (ctx)
-  (if (< (parser-context-cursor ctx) (parser-context-size ctx))
-    (elt (parser-context-data ctx) (1- (incf (parser-context-cursor ctx))))))
+(defmethod read-atom :after ((ctx string-parser-context))
+  (let ((cursor (cursor ctx)))
+    (setf (cursor ctx) (next-cursor ctx cursor))))
 
-(declaim (inline checkpoint))
-(defun checkpoint (ctx)
-  (push (parser-context-cursor ctx) (parser-context-checkpoints ctx)))
+;; We save the case-region and cursor state in checkpoints
+;; Interesting note: the checkpoint list is also implicitly saved as
+;; the cdr of the checkpoint list
+(defmethod checkpoint ((ctx string-parser-context))
+  (push (list (cursor ctx) (case-regions ctx))
+        (checkpoints ctx))
+  (values))
 
-(declaim (inline rollback))
-(defun rollback (ctx)
-  (setf (parser-context-cursor ctx) (pop (parser-context-checkpoints ctx))))
+(defmethod checkpointed-p ((ctx string-parser-context))
+  (not (null (checkpoints ctx))))
 
-(declaim (inline commit))
-(defun commit (ctx)
-  (pop (parser-context-checkpoints ctx)))
+(defmethod rollback ((ctx string-parser-context))
+  (if (checkpointed-p ctx)
+      (destructuring-bind (cursor case-regions) (pop (checkpoints ctx))
+        (setf (cursor ctx) cursor
+              (case-regions ctx) case-regions))
+      (error "There is no checkpoint to rollback for context ~S." ctx))
+  (values))
 
+(defmethod commit ((ctx string-parser-context))
+  (if (checkpointed-p ctx)
+      (pop (checkpoints ctx))
+      (error "There is no checkpoint to commit for context ~S." ctx))
+  (values))
+
+(defmethod begin-nocase ((ctx string-parser-context))
+  (push t (case-regions ctx))
+  (values))
+
+(defmethod begin-case ((ctx string-parser-context))
+  (push nil (case-regions ctx))
+  (values))
+
+(defmethod end-case-region ((ctx string-parser-context))
+  (flet ((checkpointed-case-region (ctx)
+           (second (first (checkpoints ctx)))))
+    (cond
+      ((null (case-regions ctx))
+       (error "There is no case-region is in effect for context ~S." ctx))
+      ((eq (case-regions ctx) (checkpointed-case-region ctx))
+       (error "Cannot end a case-region that began outside the last checkpoint boundary."))
+      (t (pop (case-regions ctx))))
+    (values)))
+
+(defmethod case-insensitive-p ((ctx string-parser-context))
+  (first (case-regions ctx)))
+
+(defmethod context-subseq ((ctx string-parser-context) start &optional end)
+  (check-type start (integer 0))
+  (check-type end (or null (integer 0)))
+  (make-instance 'string-parser-context
+                 :data (source-data ctx)
+                 :start start
+                 :size (or end (data-size ctx))
+                 ;; TODO: not sure this should be copied.
+                 :attachment (attachment ctx)))
+
+(defmethod context-data ((ctx string-parser-context))
+  (subseq (source-data ctx) (cursor ctx) (data-size ctx)))
+
+;; TODO: cursor gets initialized to nil for 0-length data, data-size
+;; gets inialized to (min data-size (length data)) (or at least have
+;; some asserts)
+(defmethod next-cursor ((ctx string-parser-context) cursor)
+  (check-type cursor (integer 0))
+  (if (< cursor (data-size ctx))
+      (1+ cursor)
+      ;; EOF is data-size
+      (data-size ctx)))
 
 ;;; Atom, Rule & Type Matching
 
-(declaim (inline match-atom))
-(defun match-atom (ctx atom &aux (c (peek-atom ctx)))
-  (if (and c
-           (if (first (parser-context-icases ctx))
-               (char= (char-upcase atom) (char-upcase c))
-               (char= atom c)))
-      (read-atom ctx)))
+(defun match-char (ctx char &aux)
+  (multiple-value-bind (atom eof-p) (peek-atom ctx)
+    (if (and (typep atom 'character)
+             (not eof-p)
+             (if (case-insensitive-p ctx)
+                 (char-equal atom char)
+                 (char= atom char)))
+        (read-atom ctx)
+        nil)))
 
 (defmacro match-type (ctx type)
-  `(if (typep (peek-atom ,ctx) ',type)
-       (read-atom ,ctx)))
+  `(multiple-value-bind (atom eof-p) (peek-atom ,ctx)
+     (if (and (not eof-p)
+              (typep atom ',type))
+         (read-atom ,ctx)
+         nil)))
 
 (defmacro match-rule (ctx rule args)
   `(,rule ,@(nconc (list ctx) args)))
@@ -113,7 +245,7 @@
     (ret ctx (in-meta (eql t)) (directive character) &optional args)
   "Transforms a character form."
   (declare (ignore ret args))
-  `(match-atom ,ctx ,directive))
+  `(match-char ,ctx ,directive))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive string) &optional args)
@@ -123,8 +255,8 @@
    ret ctx t :checkpoint
    `((and
       ,@(mapcar
-         (lambda (form) `(match-atom ,ctx ,form))
          (coerce directive 'list))
+         (lambda (form) `(match-char ,ctx ,form))
       ,directive))))
 
 (defmethod transform-grammar (ret ctx in-meta directive &optional args)
@@ -146,15 +278,18 @@
 Make case-insensitive atom comparison in supplied FORMs."
   (with-unique-names (wrapper-ret val)
     `(progn
-       (push t (parser-context-icases ,ctx))
+       (begin-nocase ,ctx)
        (let ((,wrapper-ret
               (lambda (,val)
-                (pop (parser-context-icases ,ctx))
+                (end-case-region ,ctx)
                 (funcall ,ret ,val))))
          (declare (ignorable ,wrapper-ret))
-         (let ((,val ,(transform-grammar wrapper-ret ctx t :and args)))
-           (pop (parser-context-icases ,ctx))
-           ,val)))))
+         ;; You know, we could just call the return wrapper here
+         ;; instead of duplicating return code.... (involves a
+         ;; funcall, but is potentially much shorter)
+         (prog1
+             ,(transform-grammar wrapper-ret ctx t :and args)
+           (end-case-region ,ctx))))))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :checkpoint)) &optional args)
@@ -326,7 +461,7 @@ Resets supplied CHAR-ACCUM."
 
 Returns T when reached to the end of supplied input data."
   (declare (ignore ret args))
-  `(= (parser-context-cursor ,ctx) (parser-context-size ,ctx)))
+  `(nth-value 1 (peek-atom ,ctx)))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :read-atom)) &optional args)
@@ -348,9 +483,8 @@ print the value of the VAR."
      ,(if (car args)
           `(format t "DEBUG: ~s: ~a~%" ',(car args) ,(car args))
           `(format t "DEBUG: cursor: [~s] `~s'~%"
-                   (parser-context-cursor ,ctx)
-                   (elt (parser-context-data ,ctx)
-                        (parser-context-cursor ,ctx))))))
+                   (cursor ,ctx)
+                   (multiple-value-list (peek-atom ,ctx))))))
 
 
 ;;; Atom, Rule & Renderer Definition Macros
@@ -368,7 +502,7 @@ print the value of the VAR."
               (lambda (,val)
                 (return-from ,name (apply #'values ,val)))))
          ,(if attachment
-              `(let ((,attachment (parser-context-attachment ,ctx)))
+              `(let ((,attachment (attachment ,ctx)))
                  ,(transform-grammar ret ctx t :checkpoint body))
               (transform-grammar ret ctx t :checkpoint body))))))
 
@@ -376,7 +510,7 @@ print the value of the VAR."
   (with-unique-names (ctx)
     `(defun ,name (,ctx ,@args)
        ,(if attachment
-            `(let ((,attachment (parser-context-attachment ,ctx)))
+            `(let ((,attachment (attachment ,ctx)))
                ,@body)
             `(progn ,@body))
        t)))
