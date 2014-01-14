@@ -402,7 +402,7 @@ supplied arguments will get passed to rule."
       (transform-grammar
        ret ctx t :or (mapcar (lambda (form) `(:rule ,form ,@(cdr args)))
                              (cdar args)))
-      `(match-rule ,ctx ,(car args) ,(cdr args))))
+      `(,(car args) ,ctx ,@(cdr args))))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :assign)) &optional args)
