@@ -28,6 +28,27 @@
 
 (in-package :meta-sexp)
 
+;; Internal API for parser contexts
+;; (create-parser-context data-source &rest args) -- constructor
+;; (peek-atom context) -- Return the current item without consuming it
+;; (read-atom ctx) -- Consume and return the current item
+;; (checkpoint ctx) -- Save the current parser position
+;; (checkpointed-p ctx) -- t if there i
+;; (commit ctx) --
+;; (rollback ctx)
+;; (begin-nocase ctx)
+;; (begin-case ctx)
+;; (end-case-region ctx)
+;; (cursor ctx) -- Return some sort of cursor indicating the current
+;; position
+;; (context-subseq ctx start &optional end) -- Return a fresh
+;; parser context for the subsequence of CTX bounded by the cursors
+;; START and END.
+;; (context-data ctx) -- Return the data held in the context, in
+;; whatever form is appropriate.
+;; (next-cursor context cursor) -- incf for cursors (needed for
+;; context-subseq bounds
+;; (attachment context) -- custom data attachment for contexts
 
 ;;; Parser Context Structure & Routines
 
@@ -272,6 +293,8 @@
      (mapcar (lambda (form) (transform-grammar ret ctx nil form)) directive))
     (t directive)))
 
+;; TODO: just using a checkpoint with begin-nocase would be a lot less
+;; code, but some contexts might not checkpoint case-regions....
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :icase)) &optional args)
   "\(:ICASE FORM FORM ...)
