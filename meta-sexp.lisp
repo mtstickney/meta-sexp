@@ -254,9 +254,10 @@
   (transform-grammar
    ret ctx t :checkpoint
    `((and
-      ,@(mapcar
-         (coerce directive 'list))
+      ,@(map
+         'list
          (lambda (form) `(match-char ,ctx ,form))
+         directive)
       ,directive))))
 
 (defmethod transform-grammar (ret ctx in-meta directive &optional args)
