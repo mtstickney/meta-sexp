@@ -362,9 +362,7 @@ arguments."
 Sequentially evaluates supplied FORMs within an AND scope and regardless of the
 return value of ANDed FORMs, block returns T. \(Similar to `?' in regular
 expressions.)"
-  `(prog1 t (and ,@(mapcar
-                    (lambda (form) (transform-grammar ret ctx t form))
-                    args))))
+  `(prog1 t ,(transform-grammar ret ctx t :and args)))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :*)) &optional args)
