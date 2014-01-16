@@ -205,3 +205,120 @@
       (1+ cursor)
       ;; EOF is data-size
       (data-size ctx)))
+
+;; Parser context for lists of objects
+(defclass list-parser-context (parser-context)
+  ((data :initarg :data :reader source-data :type list)
+   (cursor :initarg :start :accessor cursor :type cons)
+   (end :initarg :end :accessor end-cursor :type cons)
+   (case-regions :initform nil :accessor case-regions :type list)
+   (checkpoints :initform nil :accessor checkpoints :type list)
+   (attachment :initarg :attachment :accessor attachment))
+  (:documentation "A parser context used when parsing a list of objects."))
+
+(defmethod create-parser-context ((input list) &key start end attachment)
+  (make-instance 'list-parser-context
+                 :data input
+                 :start (or start input)
+                 :end end
+                 :attachment attachment))
+
+(defmethod peek-atom ((ctx list-parser-context))
+  (let ((cursor (cursor ctx)))
+    (if (null cursor)
+        (values nil t)
+        (values (car cursor) nil))))
+
+(defmethod read-atom :after ((ctx list-parser-context))
+  (setf (cursor ctx) (cdr (cursor ctx))))
+
+(defmethod checkpoint ((ctx list-parser-context))
+  (push (list (cursor ctx) (case-regions ctx))
+        (checkpoints ctx))
+  (values))
+
+(defmethod checkpointed-p ((ctx list-parser-context))
+  (not (null (checkpoints ctx))))
+
+(defmethod rollback ((ctx list-parser-context))
+  (if (checkpointed-p ctx)
+      (destructuring-bind (cursor case-regions) (pop (checkpoints ctx))
+        (setf (cursor ctx) cursor
+              (case-regions ctx) case-regions))
+      (error "There is no checkpoint to rollback for context ~S." ctx))
+  (values))
+
+(defmethod commit ((ctx list-parser-context))
+  (if (checkpointed-p ctx)
+      (pop (checkpoints ctx))
+      (error "There is no checkpoint to commit for context ~S." ctx))
+  (values))
+
+(defmethod begin-nocase ((ctx list-parser-context))
+  (push t (case-regions ctx))
+  (values))
+
+(defmethod begin-case ((ctx list-parser-context))
+  (push nil (case-regions ctx))
+  (values))
+
+(defmethod end-case-region ((ctx list-parser-context))
+  (flet ((checkpointed-case-region (ctx)
+           (second (first (checkpoints ctx)))))
+    (cond
+      ((null (case-regions ctx))
+       (error "There is no case-region in effect for context ~S." ctx))
+      ((eq (case-regions ctx) (checkpointed-case-region ctx))
+       (error "Cannot end a case-region that began outside the last checkpoint boundary."))
+      (t (pop (case-regions ctx))))
+    (values)))
+
+(defmethod case-insensitive-p ((ctx list-parser-context))
+  (first (case-regions ctx)))
+
+(deftype list-context-cursor () '(or cons null))
+
+(defmethod context-subseq ((ctx list-parser-context) start &optional end)
+  (check-type start list-context-cursor)
+  (check-type end list-context-cursor)
+
+  (assert (tailp start (source-data ctx))
+          (start)
+          "Start cursor ~S does not belong to the context ~S."
+          start
+          ctx)
+  (assert (tailp end (source-data ctx))
+          (end)
+          "End cursor ~S does not belong to the context ~S."
+          end
+          ctx)
+
+  (make-instance 'list-parser-context
+                 :data (source-data ctx)
+                 :start start
+                 :end end
+                 :attachment (attachment ctx)))
+
+(defun list-subseq (start &optional end)
+  (check-type start list-context-cursor)
+  (check-type end list-context-cursor)
+
+  (cond
+    ((endp end) start)
+    ((tailp end start) (ldiff start end))
+    (t nil)))
+
+(defmethod context-data ((ctx list-parser-context))
+  (if (and (eq (cursor ctx) (source-data ctx))
+           (endp (end-cursor ctx)))
+      ;; TODO: we're returning the original list, maybe we shouldn't
+      (source-data ctx)
+      (list-subseq (cursor ctx) (end-cursor ctx))))
+
+(defmethod next-cursor ((ctx list-parser-context) cursor)
+  (assert (tailp cursor (source-data ctx))
+          (cursor)
+          "Cursor ~S does not belong to the context ~S."
+          cursor
+          ctx)
+  (cdr cursor))
