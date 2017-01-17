@@ -184,11 +184,11 @@
   (first (case-regions ctx)))
 
 (defmethod context-subseq ((ctx string-parser-context) start &optional end)
-  (check-type start (integer 0))
+  (check-type start (null (integer 0)))
   (check-type end (or null (integer 0)))
   (make-instance 'string-parser-context
                  :data (source-data ctx)
-                 :start start
+                 :start (or start 0)
                  :size (or end (data-size ctx))
                  ;; TODO: not sure this should be copied.
                  :attachment (attachment ctx)))
