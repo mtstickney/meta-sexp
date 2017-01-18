@@ -73,6 +73,9 @@
 (defgeneric cursor (context)
   (:documentation "Return an object indicating the current match location in the context."))
 
+(defgeneric lift-cursor (context cursor)
+  (:documentation "Convert a cursor for a child context, CURSOR, to a cursor in the parent context CONTEXT."))
+
 (defgeneric context-subseq (context start &optional end)
   (:documentation "Return a new context for the subsequence of this context bounded by the cursor objects START and (optionally) END. As with SUBSEQ, END is an exclusive bound, and if END is nil, the end of the sequence is used."))
 
@@ -88,15 +91,25 @@
 (defgeneric (setf attachment) (val context)
   (:documentation "Set the user-defined data object attached to CONTEXT to VAL."))
 
+(defstruct cursor
+  context
+  data)
+
 (defclass string-parser-context (parser-context)
   ((data :initarg :data :reader source-data :type string)
-   (cursor :initarg :start :accessor cursor :type '(or null (integer 0)))
+   (cursor :initarg :start :accessor %cursor :type cursor)
    ;; Artificial buffer size, used for zero-copy subsequences
    (size :initarg :size :accessor data-size :type '(integer 0))
    (case-regions :initform nil :accessor case-regions :type list)
    (checkpoints :initform nil :accessor checkpoints :type list)
    (attachment :initarg :attachment :accessor attachment))
   (:documentation "A parser context used when parsing a string."))
+
+(defmethod initialize-instance :after ((object string-parser-context) &key (start 0) end &allow-other-keys)
+  (check-type start (integer 0))
+  (check-type end (or (integer 0) null))
+  (setf (%cursor object)
+        (make-cursor :context object :data start)))
 
 (defgeneric create-parser-context (input &rest args))
 
@@ -125,16 +138,18 @@
 
 (defmethod peek-atom ((ctx string-parser-context))
   (with-accessors ((size data-size)
-                   (cursor cursor)
+                   (cursor %cursor)
                    (data source-data))
       ctx
-    (if (< cursor size)
-        (values (elt data cursor) nil)
+    (if (< (cursor-data cursor) size)
+        (values (elt data (cursor-data cursor)) nil)
         (values nil t))))
 
 (defmethod read-atom :after ((ctx string-parser-context))
-  (let ((cursor (cursor ctx)))
-    (setf (cursor ctx) (next-cursor ctx cursor))))
+  ;; Increment in-place so we don't have to cons a new cursor for
+  ;; every single position. CURSOR returns a copy of the cursor, so
+  ;; this is safe.
+  (incf (cursor-data (%cursor ctx))))
 
 ;; We save the case-region and cursor state in checkpoints
 ;; Interesting note: the checkpoint list is also implicitly saved as
@@ -150,7 +165,7 @@
 (defmethod rollback ((ctx string-parser-context))
   (if (checkpointed-p ctx)
       (destructuring-bind (cursor case-regions) (pop (checkpoints ctx))
-        (setf (cursor ctx) cursor
+        (setf (%cursor ctx) cursor
               (case-regions ctx) case-regions))
       (error "There is no checkpoint to rollback for context ~S." ctx))
   (values))
@@ -180,57 +195,77 @@
       (t (pop (case-regions ctx))))
     (values)))
 
+(defmethod cursor ((context string-parser-context))
+  (copy-cursor (%cursor context)))
+
 (defmethod case-insensitive-p ((ctx string-parser-context))
   (first (case-regions ctx)))
 
 (defmethod context-subseq ((ctx string-parser-context) start &optional end)
-  (check-type start (null (integer 0)))
-  (check-type end (or null (integer 0)))
+  (check-type start (or cursor null))
+  (check-type end (or cursor null))
   (make-instance 'string-parser-context
                  :data (source-data ctx)
-                 :start (or start 0)
-                 :size (or end (data-size ctx))
+                 :start (if start (cursor-data start) nil)
+                 :size (if end (cursor-data end) (data-size ctx))
                  ;; TODO: not sure this should be copied.
                  :attachment (attachment ctx)))
 
 (defmethod context-data ((ctx string-parser-context))
-  (subseq (source-data ctx) (cursor ctx) (data-size ctx)))
+  (subseq (source-data ctx) (cursor-data (%cursor ctx)) (data-size ctx)))
 
 ;; TODO: cursor gets initialized to nil for 0-length data, data-size
 ;; gets inialized to (min data-size (length data)) (or at least have
 ;; some asserts)
 (defmethod next-cursor ((ctx string-parser-context) cursor)
-  (check-type cursor (integer 0))
-  (if (< cursor (data-size ctx))
-      (1+ cursor)
-      ;; EOF is data-size
-      (data-size ctx)))
+  (check-type cursor cursor)
+  (assert (eq ctx (cursor-context cursor))
+          ()
+          "Invalid cursor ~S for context ~S"
+          cursor
+          ctx)
+  (let ((current (cursor-data cursor)))
+    (make-cursor :context ctx
+                 :data (if (< current (data-size ctx))
+                           (1+ current)
+                           ;; EOF is data-size
+                           (data-size ctx)))))
 
 ;; Parser context for lists of objects
 (defclass list-parser-context (parser-context)
   ((data :initarg :data :reader source-data :type list)
-   (cursor :initarg :start :accessor cursor :type cons)
-   (end :initarg :end :accessor end-cursor :type cons)
+   (cursor :initarg :start :accessor %cursor :type cursor)
+   (end :initarg :end :accessor end-cursor :type cursor)
    (case-regions :initform nil :accessor case-regions :type list)
    (checkpoints :initform nil :accessor checkpoints :type list)
    (attachment :initarg :attachment :accessor attachment))
   (:documentation "A parser context used when parsing a list of objects."))
 
+(defmethod initialize-instance :after ((object list-parser-context) &key data start end &allow-other-keys)
+  (setf (%cursor object) (make-cursor :context object
+                                      :data (or start data))
+        (end-cursor object) (make-cursor :context object
+                                         :data end)))
+
 (defmethod create-parser-context ((input list) &key start end attachment)
   (make-instance 'list-parser-context
                  :data input
-                 :start (or start input)
+                 :start start
                  :end end
                  :attachment attachment))
 
+(defmethod cursor ((context list-parser-context))
+  (copy-cursor (%cursor context)))
+
 (defmethod peek-atom ((ctx list-parser-context))
-  (let ((cursor (cursor ctx)))
-    (if (null cursor)
+  (let ((cursor (%cursor ctx)))
+    (if (endp (cursor-data cursor))
         (values nil t)
-        (values (car cursor) nil))))
+        (values (car (cursor-data cursor)) nil))))
 
 (defmethod read-atom :after ((ctx list-parser-context))
-  (setf (cursor ctx) (cdr (cursor ctx))))
+  (setf (cursor-data (%cursor ctx))
+        (cdr (cursor-data (%cursor ctx)))))
 
 (defmethod checkpoint ((ctx list-parser-context))
   (push (list (cursor ctx) (case-regions ctx))
@@ -238,12 +273,12 @@
   (values))
 
 (defmethod checkpointed-p ((ctx list-parser-context))
-  (not (null (checkpoints ctx))))
+  (not (endp (checkpoints ctx))))
 
 (defmethod rollback ((ctx list-parser-context))
   (if (checkpointed-p ctx)
       (destructuring-bind (cursor case-regions) (pop (checkpoints ctx))
-        (setf (cursor ctx) cursor
+        (setf (%cursor ctx) cursor
               (case-regions ctx) case-regions))
       (error "There is no checkpoint to rollback for context ~S." ctx))
   (values))
@@ -276,18 +311,16 @@
 (defmethod case-insensitive-p ((ctx list-parser-context))
   (first (case-regions ctx)))
 
-(deftype list-context-cursor () '(or cons null))
-
 (defmethod context-subseq ((ctx list-parser-context) start &optional end)
-  (check-type start list-context-cursor)
-  (check-type end list-context-cursor)
+  (check-type start cursor)
+  (check-type end cursor)
 
-  (assert (tailp start (source-data ctx))
+  (assert (eq (cursor-context start) ctx)
           (start)
           "Start cursor ~S does not belong to the context ~S."
           start
           ctx)
-  (assert (tailp end (source-data ctx))
+  (assert (eq (cursor-context end) ctx)
           (end)
           "End cursor ~S does not belong to the context ~S."
           end
@@ -295,8 +328,8 @@
 
   (make-instance 'list-parser-context
                  :data (source-data ctx)
-                 :start start
-                 :end end
+                 :start (cursor-data start)
+                 :end (cursor-data end)
                  :attachment (attachment ctx)))
 
 (defun list-subseq (start &optional end)
@@ -309,16 +342,17 @@
     (t nil)))
 
 (defmethod context-data ((ctx list-parser-context))
-  (if (and (eq (cursor ctx) (source-data ctx))
-           (endp (end-cursor ctx)))
+  (if (and (eq (cursor-data (%cursor ctx)) (source-data ctx))
+           (endp (cursor-data (end-cursor ctx))))
       ;; TODO: we're returning the original list, maybe we shouldn't
       (source-data ctx)
-      (list-subseq (cursor ctx) (end-cursor ctx))))
+      (list-subseq (cursor-data (%cursor ctx)) (cursor-data (end-cursor ctx)))))
 
 (defmethod next-cursor ((ctx list-parser-context) cursor)
-  (assert (tailp cursor (source-data ctx))
+  (assert (eq (cursor-context cursor) ctx)
           (cursor)
           "Cursor ~S does not belong to the context ~S."
           cursor
           ctx)
-  (cdr cursor))
+  (make-cursor :context ctx
+               :data (cdr (cursor-data cursor))))
