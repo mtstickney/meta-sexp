@@ -95,6 +95,12 @@
   context
   data)
 
+(defmethod lift-cursor ((ctx parser-context) cursor)
+  ;; For contexts with no child contexts, there is no lifting to do
+  ;; and the cursor must match the context exactly.
+  (let ((matchp (eq (cursor-context cursor) ctx)))
+    (values (if matchp cursor nil) matchp)))
+
 (defclass string-parser-context (parser-context)
   ((data :initarg :data :reader source-data :type string)
    (cursor :initarg :start :accessor %cursor :type cursor)
