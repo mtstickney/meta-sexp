@@ -112,10 +112,10 @@
   (:documentation "A parser context used when parsing a string."))
 
 (defmethod initialize-instance :after ((object string-parser-context) &key (start 0) end &allow-other-keys)
-  (check-type start (integer 0))
+  (check-type start (or (integer 0) null))
   (check-type end (or (integer 0) null))
   (setf (%cursor object)
-        (make-cursor :context object :data start)))
+        (make-cursor :context object :data (or start 0))))
 
 (defgeneric create-parser-context (input &rest args))
 
@@ -318,24 +318,24 @@
   (first (case-regions ctx)))
 
 (defmethod context-subseq ((ctx list-parser-context) start &optional end)
-  (check-type start cursor)
-  (check-type end cursor)
+  (check-type start (or cursor null))
+  (check-type end (or cursor null))
 
-  (assert (eq (cursor-context start) ctx)
+  (assert (or (null start) (eq (cursor-context start) ctx))
           (start)
           "Start cursor ~S does not belong to the context ~S."
           start
           ctx)
-  (assert (eq (cursor-context end) ctx)
+  (assert (or (null end) (eq (cursor-context end) ctx))
           (end)
           "End cursor ~S does not belong to the context ~S."
           end
           ctx)
 
   (make-instance 'list-parser-context
-                 :data (source-data ctx)
-                 :start (cursor-data start)
-                 :end (cursor-data end)
+                 :data (if start (cursor-data start) (source-data ctx))
+                 :start (if start (cursor-data start) (source-data ctx))
+                 :end (if end (cursor-data end) nil)
                  :attachment (attachment ctx)))
 
 (defun list-subseq (start &optional end)
