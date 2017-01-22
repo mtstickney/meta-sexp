@@ -103,7 +103,8 @@
 
 (defclass string-parser-context (parser-context)
   ((data :initarg :data :reader source-data :type string)
-   (cursor :initarg :start :accessor %cursor :type cursor)
+   (start-cursor :initarg :start :accessor start-cursor :type cursor)
+   (cursor :accessor %cursor :type cursor)
    ;; Artificial buffer size, used for zero-copy subsequences
    (size :initarg :size :accessor data-size :type '(integer 0))
    (case-regions :initform nil :accessor case-regions :type list)
@@ -114,8 +115,8 @@
 (defmethod initialize-instance :after ((object string-parser-context) &key (start 0) end &allow-other-keys)
   (check-type start (or (integer 0) null))
   (check-type end (or (integer 0) null))
-  (setf (%cursor object)
-        (make-cursor :context object :data (or start 0))))
+  (setf (start-cursor object) (make-cursor :context object :data (or start 0))
+        (%cursor object) (copy-cursor (start-cursor object))))
 
 (defgeneric create-parser-context (input &rest args))
 
@@ -212,13 +213,13 @@
   (check-type end (or cursor null))
   (make-instance 'string-parser-context
                  :data (source-data ctx)
-                 :start (if start (cursor-data start) nil)
+                 :start (if start (cursor-data start) (cursor-data (start-cursor ctx)))
                  :size (if end (cursor-data end) (data-size ctx))
                  ;; TODO: not sure this should be copied.
                  :attachment (attachment ctx)))
 
 (defmethod context-data ((ctx string-parser-context))
-  (subseq (source-data ctx) (cursor-data (%cursor ctx)) (data-size ctx)))
+  (subseq (source-data ctx) (cursor-data (start-cursor ctx)) (data-size ctx)))
 
 ;; TODO: cursor gets initialized to nil for 0-length data, data-size
 ;; gets inialized to (min data-size (length data)) (or at least have
@@ -348,11 +349,10 @@
     (t nil)))
 
 (defmethod context-data ((ctx list-parser-context))
-  (if (and (eq (cursor-data (%cursor ctx)) (source-data ctx))
-           (endp (cursor-data (end-cursor ctx))))
+  (if (endp (cursor-data (end-cursor ctx)))
       ;; TODO: we're returning the original list, maybe we shouldn't
       (source-data ctx)
-      (list-subseq (cursor-data (%cursor ctx)) (cursor-data (end-cursor ctx)))))
+      (list-subseq (source-data ctx) (cursor-data (end-cursor ctx)))))
 
 (defmethod next-cursor ((ctx list-parser-context) cursor)
   (assert (eq (cursor-context cursor) ctx)
