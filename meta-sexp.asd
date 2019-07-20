@@ -41,5 +41,6 @@
   :version +meta-sexp-version+
   :components ((:file "packages")
                (:file "util")
+               (:file "streams")
                (:file "meta-sexp")
                (:file "atoms")))

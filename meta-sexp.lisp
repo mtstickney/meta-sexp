@@ -32,9 +32,7 @@
 ;;; Parser Context Structure & Routines
 
 (defstruct parser-context
-  (data nil :read-only t :type string)
-  (size nil :read-only t :type unsigned-byte)
-  (cursor 0 :type unsigned-byte)
+  (stream nil :read-only t :type mini-streams:mini-stream)
   (checkpoints nil)
   (icases nil)
   attachment)
@@ -42,9 +40,11 @@
 (defgeneric create-parser-context (input &rest args))
 
 (defmethod create-parser-context ((input string) &key start end attachment)
-  (make-parser-context :data input
-                       :cursor (or start 0)
-                       :size (or end (length input))
+  (make-parser-context :stream (mini-streams:make-string-mini-stream input :start (or start 0) :end end)
+                       :attachment attachment))
+
+(defmethod create-parser-context ((input mini-streams:mini-stream) &key attachment)
+  (make-parser-context :stream input
                        :attachment attachment))
 
 (defmethod create-parser-context
@@ -63,23 +63,15 @@
                    :end (or end size)
                    :attachment attachment))))
 
-(declaim (inline peek-atom))
-(defun peek-atom (ctx)
-  (if (< (parser-context-cursor ctx) (parser-context-size ctx))
-      (elt (parser-context-data ctx) (parser-context-cursor ctx))))
-
-(declaim (inline read-atom))
-(defun read-atom (ctx)
-  (if (< (parser-context-cursor ctx) (parser-context-size ctx))
-    (elt (parser-context-data ctx) (1- (incf (parser-context-cursor ctx))))))
-
 (declaim (inline checkpoint))
 (defun checkpoint (ctx)
-  (push (parser-context-cursor ctx) (parser-context-checkpoints ctx)))
+  (push (mini-streams:stream-position (parser-context-stream ctx))
+        (parser-context-checkpoints ctx)))
 
 (declaim (inline rollback))
 (defun rollback (ctx)
-  (setf (parser-context-cursor ctx) (pop (parser-context-checkpoints ctx))))
+  (setf (mini-streams:stream-position (parser-context-stream ctx))
+        (pop (parser-context-checkpoints ctx))))
 
 (declaim (inline commit))
 (defun commit (ctx)
@@ -89,16 +81,16 @@
 ;;; Atom, Rule & Type Matching
 
 (declaim (inline match-atom))
-(defun match-atom (ctx atom &aux (c (peek-atom ctx)))
+(defun match-atom (ctx atom &aux (c (mini-streams:peek-atom (parser-context-stream ctx))))
   (if (and c
            (if (first (parser-context-icases ctx))
                (char= (char-upcase atom) (char-upcase c))
                (char= atom c)))
-      (read-atom ctx)))
+      (mini-streams:read-atom (parser-context-stream ctx))))
 
 (defmacro match-type (ctx type)
-  `(if (typep (peek-atom ,ctx) ',type)
-       (read-atom ,ctx)))
+  `(if (typep (mini-streams:peek-atom (parser-context-stream ,ctx)) ',type)
+       (mini-streams:read-atom (parser-context-stream ,ctx))))
 
 (defmacro match-rule (ctx rule args)
   `(,rule ,@(nconc (list ctx) args)))
@@ -122,9 +114,9 @@
   (transform-grammar
    ret ctx t :checkpoint
    `((and
-      ,@(mapcar
-         (lambda (form) `(match-atom ,ctx ,form))
-         (coerce directive 'list))
+      ,@(map 'list
+             (lambda (form) `(match-atom ,ctx ,form))
+             directive)
       ,directive))))
 
 (defmethod transform-grammar (ret ctx in-meta directive &optional args)
@@ -310,7 +302,7 @@ accumulator. (See MAKE-CHAR-ACCUM and EMPTY-CHAR-ACCUM-P.)"
   (declare (ignore ret))
   (if (cdr args)
       `(char-accum-push ,(car args) ,(cadr args))
-      `(char-accum-push (read-atom ,ctx) ,(car args))))
+      `(char-accum-push (mini-streams:read-atom (parse-context-stream ,ctx)) ,(car args))))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :char-reset)) &optional args)
@@ -326,7 +318,7 @@ Resets supplied CHAR-ACCUM."
 
 Returns T when reached to the end of supplied input data."
   (declare (ignore ret args))
-  `(= (parser-context-cursor ,ctx) (parser-context-size ,ctx)))
+  `(mini-streams:eofp (parser-context-stream ,ctx)))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :read-atom)) &optional args)
@@ -334,7 +326,7 @@ Returns T when reached to the end of supplied input data."
 
 Reads current atom at the cursor position and returns read atom."
   (declare (ignore ret args))
-  `(read-atom ,ctx))
+  `(mini-streams:read-atom (parser-context-stream ,ctx)))
 
 (defmethod transform-grammar
     (ret ctx (in-meta (eql t)) (directive (eql :debug)) &optional args)
@@ -348,9 +340,8 @@ print the value of the VAR."
      ,(if (car args)
           `(format t "DEBUG: ~s: ~a~%" ',(car args) ,(car args))
           `(format t "DEBUG: cursor: [~s] `~s'~%"
-                   (parser-context-cursor ,ctx)
-                   (elt (parser-context-data ,ctx)
-                        (parser-context-cursor ,ctx))))))
+                   (mini-streams:stream-position (parser-context-stream ,ctx))
+                   (mini-streams:peek-atom (parser-context-stream ,ctx))))))
 
 
 ;;; Atom, Rule & Renderer Definition Macros
