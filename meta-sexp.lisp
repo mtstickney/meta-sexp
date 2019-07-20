@@ -53,8 +53,10 @@
         with buffer-size = (or buffer-size 8192)
         with buf = (make-string buffer-size)
         for pos = (read-sequence buf input :end buffer-size)
+        ;; Go while we haven't hit EOF or read past END.
+        while (and (plusp pos)
+                   (or (null end) (< size end)))
         sum pos into size
-        until (zerop pos)
         do (write-string buf out :end pos)
         finally (return
                   (create-parser-context
